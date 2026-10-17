@@ -44,10 +44,14 @@ private:
   uint16_t m_dataPtr;
   uint16_t m_endPtr;
   q31_t    m_maxCorr;
-  q15_t    m_centre;
-  q15_t    m_threshold;
+  q15_t    m_centre[4U];
+  q15_t    m_threshold[4U];
+  uint8_t  m_averagePtr;
   uint8_t  m_colorCode;
   bool     m_slot;
+
+  bool     m_dataSync[2];
+  uint8_t  m_SuperFrameIndex[2];
 
   bool cachCheck(uint8_t* cach);
   void extractBits(uint8_t* bytes, uint16_t start, uint8_t count_bits, bool* buffer);

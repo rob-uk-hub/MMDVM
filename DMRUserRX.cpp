@@ -1,6 +1,6 @@
 /*
  *   Copyright (C) 2009-2017,2020 by Jonathan Naylor G4KLX
- *   Copyright (C) 2025 by Rob Williams M1BGT
+ *   Copyright (C) 2025-2026 by Rob Williams M1BGT
  *
  *   This program is free software; you can redistribute it and/or modify
  *   it under the terms of the GNU General Public License as published by
@@ -39,6 +39,7 @@ const uint16_t NOENDPTR = 9999U;
 
 const uint8_t CONTROL_IDLE = 0x80U;
 const uint8_t CONTROL_DATA = 0x40U;
+const uint8_t CONTROL_VOICE = 0x20U;
 
 const uint8_t cachInterleave[DMR_CACH_LENGTH_BITS] = {
   0, 7, 8, 9, 1, 10, 11, 12, 2, 13, 14,
@@ -54,8 +55,9 @@ m_bitPtr(0U),
 m_dataPtr(0U),
 m_endPtr(NOENDPTR),
 m_maxCorr(0),
-m_centre(0),
-m_threshold(0),
+m_centre(),
+m_threshold(),
+m_averagePtr(0U),
 m_colorCode(0U),
 m_slot(false)
 {
@@ -66,8 +68,6 @@ void CDMRUserRX::reset()
   m_dataPtr   = 0U;
   m_bitPtr    = 0U;
   m_maxCorr   = 0;
-  m_threshold = 0;
-  m_centre    = 0;
   m_slot      = false;
   m_endPtr    = NOENDPTR;
 }
@@ -78,25 +78,44 @@ void CDMRUserRX::samples(const q15_t* samples, uint8_t length)
     processSample(samples[i]);
 }
 
+// Adding RSSI would be useful, but can wait
 void CDMRUserRX::processSample(q15_t sample)
 {
+  uint8_t cach[DMR_CACH_LENGTH_BYTES];
+  uint8_t dataType;
+  CDMRSlotType slotType;
+  uint8_t colorCode;
+  q15_t centre;
+  q15_t threshold;
+  uint8_t frame[DMR_FRAME_LENGTH_BYTES + 1U];
+  
   m_bitBuffer[m_bitPtr] <<= 1;
   if (sample < 0)
+  {
     m_bitBuffer[m_bitPtr] |= 0x01U;
+  }
 
   m_buffer[m_dataPtr] = sample;
+  
+  uint8_t errs = countBits32((m_bitBuffer[m_bitPtr] & DMR_SYNC_SYMBOLS_MASK) ^ DMR_BS_DATA_SYNC_SYMBOLS);
 
-  bool bsDataSyncFound = countBits32((m_bitBuffer[m_bitPtr] & DMR_SYNC_SYMBOLS_MASK) ^ DMR_BS_DATA_SYNC_SYMBOLS) <= MAX_SYNC_SYMBOLS_ERRS;
-  if (
-    bsDataSyncFound
-  ) {
+  // The voice sync is the complement of the data sync
+  bool foundBsDataSync  = (errs <= MAX_SYNC_SYMBOLS_ERRS);
+  bool foundBsVoiceSync = (errs >= (DMR_SYNC_LENGTH_SYMBOLS - MAX_SYNC_SYMBOLS_ERRS));
+  
+  bool anySyncFound = foundBsDataSync || foundBsVoiceSync;
+
+  if (anySyncFound) {
     // Sync pattern found
 
     // | CACH (24 bits/60 samples) | Payload (98 bits) | Slot type (10 bits) | Sync (DMR_SYNC_LENGTH_SAMPLES) | Slot type  Slot type (10 bits) | Payload (98 bits) |
 
+    // ptr is start of sync
     uint16_t ptr = m_dataPtr + DMR_FRAME_PLUS_CACH_LENGTH_SAMPLES - DMR_SYNC_LENGTH_SAMPLES + DMR_RADIO_SYMBOL_LENGTH;
     if (ptr >= DMR_FRAME_PLUS_CACH_LENGTH_SAMPLES)
+    {
       ptr -= DMR_FRAME_PLUS_CACH_LENGTH_SAMPLES;
+    }
     // ptr is start of first sync sample
 
     q31_t corr = 0;
@@ -111,7 +130,13 @@ void CDMRUserRX::processSample(q15_t sample)
       if (val < min)
         min = val;
 
-      switch (DMR_BS_DATA_SYNC_SYMBOLS_VALUES[i]) {
+      int8_t corrVal;
+      if (foundBsDataSync)
+        corrVal = DMR_BS_DATA_SYNC_SYMBOLS_VALUES[i];
+      else
+        corrVal = DMR_BS_VOICE_SYNC_SYMBOLS_VALUES[i];
+
+      switch (corrVal) {
       case +3:
         corr -= (val + val + val);
         break;
@@ -131,6 +156,8 @@ void CDMRUserRX::processSample(q15_t sample)
         ptr -= DMR_FRAME_PLUS_CACH_LENGTH_SAMPLES;
     }
 
+    bool first = false; // Since we are listening to a repeater assume always first for now
+
     if (corr > m_maxCorr) {
       q15_t centre = (max + min) >> 1;
 
@@ -139,64 +166,159 @@ void CDMRUserRX::processSample(q15_t sample)
 
       uint8_t sync[DMR_SYNC_BYTES_LENGTH];
 
+      // | CACH (24 bits/60 samples) | Payload (98 bits) | Slot type (10 bits) | Sync (DMR_SYNC_LENGTH_SAMPLES) | Slot type  Slot type (10 bits) | Payload (98 bits) |
       uint16_t ptr = m_dataPtr + DMR_FRAME_PLUS_CACH_LENGTH_SAMPLES - DMR_SYNC_LENGTH_SAMPLES + DMR_RADIO_SYMBOL_LENGTH;
       if (ptr >= DMR_FRAME_PLUS_CACH_LENGTH_SAMPLES)
         ptr -= DMR_FRAME_PLUS_CACH_LENGTH_SAMPLES;
-
       samplesToBits(ptr, DMR_SYNC_LENGTH_SYMBOLS, sync, 4U, centre, threshold);
 
-      uint8_t errs = 0U;
-      for (uint8_t i = 0U; i < DMR_SYNC_BYTES_LENGTH; i++)
-        errs += countBits8((sync[i] & DMR_SYNC_BYTES_MASK[i]) ^  DMR_BS_DATA_SYNC_BYTES[i]);
+      if(foundBsDataSync) {
+        uint8_t errs = 0U;
+        for (uint8_t i = 0U; i < DMR_SYNC_BYTES_LENGTH; i++)
+        {
+          errs += countBits8((sync[i] & DMR_SYNC_BYTES_MASK[i]) ^  DMR_BS_DATA_SYNC_BYTES[i]);
+        }
 
-      if (errs <= MAX_SYNC_BYTES_ERRS) {
-        //DEBUG3("DMRUserRX: data sync found centre/threshold", centre, threshold);
-        m_maxCorr   = corr;
-        m_centre    = centre;
-        m_threshold = threshold;
+        if (errs <= MAX_SYNC_BYTES_ERRS) {
+          // More work needed here
+          m_maxCorr   = corr;
+          if(first) {
+            m_threshold[0U] = m_threshold[1U] = m_threshold[2U] = m_threshold[3U] = threshold;
+            m_centre[0U]    = m_centre[1U]    = m_centre[2U]    = m_centre[3U]    = centre;
+            m_averagePtr    = 0U;
+          } else {
+            m_threshold[m_averagePtr] = threshold;
+            m_centre[m_averagePtr]    = centre;
 
-        m_endPtr    = m_dataPtr + DMR_SLOT_TYPE_LENGTH_SAMPLES / 2U + DMR_INFO_LENGTH_SAMPLES / 2U - 1U;
-        if (m_endPtr >= DMR_FRAME_PLUS_CACH_LENGTH_SAMPLES)
-          m_endPtr -= DMR_FRAME_PLUS_CACH_LENGTH_SAMPLES;
+            m_averagePtr++;
+            if (m_averagePtr >= 4U)
+            {
+              m_averagePtr = 0U;
+            }
+          }
+
+          m_endPtr    = m_dataPtr + DMR_SLOT_TYPE_LENGTH_SAMPLES / 2U + DMR_INFO_LENGTH_SAMPLES / 2U - 1U;
+          if (m_endPtr >= DMR_FRAME_PLUS_CACH_LENGTH_SAMPLES)
+          {
+            m_endPtr -= DMR_FRAME_PLUS_CACH_LENGTH_SAMPLES;
+          }
+        } 
+      } else {
+        // Audio
+        uint8_t errs = 0U;
+        for (uint8_t i = 0U; i < DMR_SYNC_BYTES_LENGTH; i++)
+        {
+          errs += countBits8((sync[i] & DMR_SYNC_BYTES_MASK[i]) ^ DMR_BS_VOICE_SYNC_BYTES[i]);
+        }
+
+        if (errs <= MAX_SYNC_BYTES_ERRS) {
+          // More work needed here
+          if(first) {
+            m_threshold[0U] = m_threshold[1U] = m_threshold[2U] = m_threshold[3U] = threshold;
+            m_centre[0U]    = m_centre[1U]    = m_centre[2U]    = m_centre[3U]    = centre;
+            m_averagePtr    = 0U;
+          } else {
+            m_threshold[m_averagePtr] = threshold;
+            m_centre[m_averagePtr]    = centre;
+
+            m_averagePtr++;
+            if (m_averagePtr >= 4U)
+            {
+              m_averagePtr = 0U;
+            }
+          }
+
+          m_maxCorr  = corr;
+
+          // | CACH (24 bits/60 samples) | Payload (98 bits) | Slot type (10 bits) | Sync (DMR_SYNC_LENGTH_SAMPLES) | Slot type  Slot type (10 bits) | Payload (98 bits) |
+          m_endPtr    = m_dataPtr + DMR_SLOT_TYPE_LENGTH_SAMPLES / 2U + DMR_INFO_LENGTH_SAMPLES / 2U - 1U;
+          if (m_endPtr >= DMR_FRAME_PLUS_CACH_LENGTH_SAMPLES)
+          {
+            m_endPtr -= DMR_FRAME_PLUS_CACH_LENGTH_SAMPLES;
+          }
+        }
+      }
+
+      // Read the CACH block to get the slot
+      uint16_t cachePtr = m_endPtr + DMR_RADIO_SYMBOL_LENGTH;
+      if (cachePtr >= DMR_FRAME_PLUS_CACH_LENGTH_SAMPLES) {
+        cachePtr -= DMR_FRAME_PLUS_CACH_LENGTH_SAMPLES;
+      }
+
+      // Read the CACH in order to get the time slot
+      centre    = (m_centre[0U]    + m_centre[1U]    + m_centre[2U]    + m_centre[3U])    >> 2;
+      threshold = (m_threshold[0U] + m_threshold[1U] + m_threshold[2U] + m_threshold[3U]) >> 2;
+
+      samplesToBits(cachePtr, DMR_CACH_LENGTH_SYMBOLS, cach, 0U, centre, threshold);
+      if(cachCheck(cach)) {
+        m_dataSync[m_slot ? 1 : 0] = foundBsDataSync; 
+        m_SuperFrameIndex[m_slot ? 1 : 0] = 0; // Only used for audio
+
+        //if(foundBsDataSync) {
+        //  DEBUG2("Found DATA sync on slot", m_slot ? 2 : 1);
+        //} else  {
+        //  DEBUG2("Found voice sync on slot", m_slot ? 2 : 1);
+        //}
       }
     }
   }
 
   if (m_dataPtr == m_endPtr) {
+    centre    = (m_centre[0U]    + m_centre[1U]    + m_centre[2U]    + m_centre[3U])    >> 2;
+    threshold = (m_threshold[0U] + m_threshold[1U] + m_threshold[2U] + m_threshold[3U]) >> 2;
+
+    // Calculate frame start (ptr):
     uint16_t ptr = m_endPtr + DMR_RADIO_SYMBOL_LENGTH + 1U + DMR_CACH_LENGTH_SAMPLES;
     if (ptr >= DMR_FRAME_PLUS_CACH_LENGTH_SAMPLES)
-	  ptr -= DMR_FRAME_PLUS_CACH_LENGTH_SAMPLES;
-
-    uint16_t cachePtr = m_endPtr + DMR_RADIO_SYMBOL_LENGTH + 1U;
-    if (cachePtr >= DMR_FRAME_PLUS_CACH_LENGTH_SAMPLES)
-	  cachePtr -= DMR_FRAME_PLUS_CACH_LENGTH_SAMPLES;
-
-    uint8_t frame[DMR_FRAME_LENGTH_BYTES + 1U];
-    samplesToBits(ptr, DMR_FRAME_LENGTH_SYMBOLS, frame, 8U, m_centre, m_threshold);
-
-    uint8_t colorCode;
-    uint8_t dataType;
-    CDMRSlotType slotType;
-    slotType.decode(frame + 1U, colorCode, dataType);
-
-    //DEBUG4("At end, cachePtr/ptr/endPtr", cachePtr, ptr, m_endPtr);
-
-    if (colorCode == m_colorCode && dataType != DT_IDLE) {
-
-      // Read the CACH in order to get the time slot
-      uint8_t cach[DMR_CACH_LENGTH_BYTES];
-      samplesToBits(cachePtr, DMR_CACH_LENGTH_SYMBOLS, cach, 0U, m_centre, m_threshold);
-      
-      if(cachCheck(cach))
-      {
-        frame[0U] = CONTROL_DATA | dataType;
-        serial.writeDMRData(m_slot, frame, DMR_FRAME_LENGTH_BYTES + 1U);
-      } else {
-        DEBUG1("CACH check failed");
-      }
+    {
+	    ptr -= DMR_FRAME_PLUS_CACH_LENGTH_SAMPLES;
     }
 
-    m_endPtr  = NOENDPTR;
+    uint16_t cachePtr = m_endPtr + DMR_RADIO_SYMBOL_LENGTH;
+    if (cachePtr >= DMR_FRAME_PLUS_CACH_LENGTH_SAMPLES)
+    {
+	    cachePtr -= DMR_FRAME_PLUS_CACH_LENGTH_SAMPLES;
+    }
+
+    // Read the CACH in order to get the time slot
+    samplesToBits(cachePtr, DMR_CACH_LENGTH_SYMBOLS, cach, 0U, centre, threshold);
+    if(cachCheck(cach) && m_SuperFrameIndex[m_slot ? 1 : 0] < 6)
+    {
+      samplesToBits(ptr, DMR_FRAME_LENGTH_SYMBOLS, frame, 8U, centre, threshold);
+
+      if(m_dataSync[m_slot ? 1 : 0]) {
+        slotType.decode(frame + 1U, colorCode, dataType);
+
+        if (colorCode == m_colorCode && dataType != DT_IDLE) {
+            m_SuperFrameIndex[m_slot ? 1 : 0] = 0; // Only used for audio
+
+            frame[0U] = CONTROL_DATA | dataType;
+            serial.writeDMRData(m_slot, frame, DMR_FRAME_LENGTH_BYTES + 1U);
+        }
+      } else {
+        // Voice
+
+        // TODO - check colour code??
+
+        if(m_SuperFrameIndex[m_slot ? 1 : 0] == 0) {
+          frame[0U] = CONTROL_VOICE;
+        } else {
+          frame[0U] = m_SuperFrameIndex[m_slot ? 1 : 0];
+        }
+        serial.writeDMRData(m_slot, frame, DMR_FRAME_LENGTH_BYTES + 1U);
+
+        if(m_SuperFrameIndex[m_slot ? 1 : 0] > 6) {
+          // Error!
+          DEBUG2("Invalid super frame index", m_SuperFrameIndex[m_slot ? 1 : 0]);
+        } else {
+          m_SuperFrameIndex[m_slot ? 1 : 0] = m_SuperFrameIndex[m_slot ? 1 : 0] + 1;
+        }
+      }
+
+      // Identify next slot pointers since there won't be an audio sync for all
+      // Since the rxed symbol array contains exactly DMR_FRAME_PLUS_CACH_LENGTH_SAMPLES symbols the next end should be the same as the current end :-) 
+    }
+
     m_maxCorr = 0;
   }
 
