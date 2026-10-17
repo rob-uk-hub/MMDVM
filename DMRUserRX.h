@@ -50,10 +50,14 @@ private:
   uint8_t  m_colorCode;
   bool     m_slot;
 
-  bool     m_dataSync[2];
-  uint8_t  m_SuperFrameIndex[2];
+  bool     m_dataSync[2U];
+  uint8_t  m_SuperFrameIndex[2U];
+  uint8_t  m_slotColorCode[2U];
+  bool     m_hasSync;
+  bool     m_syncThisBurst;
+  uint8_t  m_syncCount;
 
-  bool cachCheck(uint8_t* cach);
+  bool cachSlot(uint8_t* cach, bool& slot);
   void extractBits(uint8_t* bytes, uint16_t start, uint8_t count_bits, bool* buffer);
 
   void processSample(q15_t sample);
@@ -63,4 +67,3 @@ private:
 #endif
 
 #endif
-

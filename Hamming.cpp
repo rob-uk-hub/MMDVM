@@ -27,7 +27,7 @@ const int syndromeMap[8] = {
     5, // syndrome 2 → P2 (bit 5)
     2, // syndrome 3 → D3 (bit 2)
     6, // syndrome 4 → P3 (bit 6)
-    0, // syndrome 5 → D2 (bit 1)
+    0, // syndrome 5 → D1 (bit 0)
     3, // syndrome 6 → D4 (bit 3)
     1, // syndrome 7 → D2 (bit 1)
 };
@@ -61,7 +61,8 @@ bool decodeSingleDMRHamming74(uint8_t *received) {
     if (syndrome != 0) {
         int errorBit = syndromeMap[syndrome];
         if (errorBit != -1) {
-            DEBUG2("Error detected, flipping bit.", errorBit);
+            // A single bit error is routine on a weak signal, so it is
+            // corrected silently rather than being reported as a fault.
             received[errorBit] ^= 1;  // Flip bit
 
             // Return false to indicate a change was made (it might be good now)
@@ -73,22 +74,10 @@ bool decodeSingleDMRHamming74(uint8_t *received) {
     return true;
 }
 
-bool decodeDMRHamming74(uint8_t *received) {
-    // Check it multiple times to make sure we know all are valid
-
-    //char receivedLog[28];
-    //snprintf(receivedLog, 28, "Input Hamming 7,4: %d%d%d%d %d%d%d", 
-    //    received[0], received[1], received[2], received[3], 
-    //    received[4], received[5], received[6]);
-    //DEBUG1(receivedLog);
-
-    // The first pass may result in a bit flip, the second must not
-    for(uint8_t i=0;i<2;i++)
-    {
-        if(decodeSingleDMRHamming74(received)) {
-            return true;
-        }
-    }
-
-    return false;
+// Corrects at most one bit of a DMR Hamming(7,4) codeword in place and returns
+// the number of bits corrected (0 or 1). The code is perfect, so every 7 bit
+// word has a valid correction. A return of 0 is therefore the only evidence
+// that the word arrived clean, and a return of 1 means it may be wrong.
+uint8_t decodeDMRHamming74(uint8_t *received) {
+    return decodeSingleDMRHamming74(received) ? 0U : 1U;
 }
