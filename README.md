@@ -1,3 +1,14 @@
+# MMDVM Firmware
+
+## Changes from upstream repo
+
+This is a fork of the upstream repo adding the following extra features:
+- Receive only DMR User Mode - allows a dual slot repeater to be monitored for DMR Data and Audio.  See `INTERFACE.md` for configuration details.
+
+For general use use the upstream https://github.com/g4klx/MMDVM repo for the latest updates.
+
+## Info
+
 This is the source code of the MMDVM firmware that supports D-Star, DMR, System Fusion, P25, NXDN, M17, POCSAG, AX.25, and FM modes.
 
 It runs on the Arduino Due, the ST-Micro STM32F4xxx and STM32F7xxx processors, as well as the Teensy 3.5/3.6. What these platforms have in common is the use of an ARM Cortex-M3, M4, or M7 processors with a minimum clock speed greater of 80 MHz, and access to at least one analogue to digital converter, one digital to analogue converter, as well as a number of GPIO pins.
